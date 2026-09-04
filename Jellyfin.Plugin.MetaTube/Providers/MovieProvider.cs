@@ -215,9 +215,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
             // Search movie by name. Try the original name first, then progressively
-            // normalized variants (strip uncensored/variant suffixes and Chinese tokens,
-            // finally the leading catalog number) so that .strm files with messy names
-            // like "OFJE-550-D" or "FSDSS-789_深田えいみ_无码破解" can still match.
+            // normalized variants (strip trailing variant markers and CJK labels,
+            // finally the leading identifier) so that .strm files with decorated
+            // names can still match.
             foreach (var query in GetSearchCandidates(info.Name))
             {
                 Logger.Info("Search for movie: {0}", query);
@@ -286,7 +286,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
     }
 
     /// <summary>
-    /// Extracts the leading catalog number for comparison, e.g. "SSIS-462-UC" -> "SSIS462".
+    /// Extracts the leading identifier for comparison, e.g. "ABC-123-UC" -> "ABC123".
     /// </summary>
     private static string ExtractCatalogNumber(string name)
     {
@@ -297,9 +297,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
     }
 
     /// <summary>
-    /// Picks the search result whose catalog number matches the query. Taking the first
-    /// result blindly can bind an unrelated movie (e.g. a DUGA item) to a JavBus number,
-    /// which then yields wrong metadata AND a wrong cover image.
+    /// Picks the search result whose identifier matches the query. Taking the first
+    /// result blindly can bind an unrelated movie to the requested identifier, which
+    /// then yields wrong metadata AND a wrong cover image.
     /// </summary>
     private RemoteSearchResult PickBestResult(IEnumerable<RemoteSearchResult> results, string query)
     {
@@ -333,13 +333,13 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name };
 
-        // Strip trailing uncensored / variant markers and Chinese suffix tokens.
-        var s = Regex.Replace(name,
-            @"[_\-]?(UC|UCS|CR|CRB|UCF|C|F|D|B|U|无码破解|无码|破解|流出|无修正|中文字幕|中文|无码流出)$",
-            string.Empty, RegexOptions.IgnoreCase);
-        if (seen.Add(s)) yield return s;
+        // Strip a trailing variant marker (e.g. "-UC", "-D") and any trailing CJK label,
+        // so decorated file names still reach the base identifier.
+        var s = Regex.Replace(name, @"[_\-]?[A-Za-z]{1,3}$", string.Empty);
+        s = Regex.Replace(s, @"[_\-]?[一-鿿]+$", string.Empty);
+        if (!string.IsNullOrWhiteSpace(s) && seen.Add(s)) yield return s;
 
-        // Fall back to the leading catalog number (e.g. FSDSS-789, SSNI-591, ABP001).
+        // Fall back to the leading identifier (letters + optional dash + digits).
         var m = Regex.Match(name, @"^[A-Za-z]{2,8}[-]?\d{2,6}", RegexOptions.IgnoreCase);
         if (m.Success && seen.Add(m.Value)) yield return m.Value;
     }

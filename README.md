@@ -39,6 +39,24 @@ MetaTube Plugin for Jellyfin/Emby.
 - Face Detection: Cut primary image with face centered by face detection engine.
 - Auto Translation: Support translate certain metadata to preferred language.
 
+## Fork changes: `.strm` scraping
+
+This fork improves metadata scraping for libraries built from `.strm` files:
+
+- **Graceful handling of unmatched items**: a "not found" response from the metadata API no longer
+  aborts the whole refresh. Items without a resolvable identifier are skipped quietly instead of
+  raising an error.
+- **Normalized search retry**: when the exact file name yields nothing, the search is retried with
+  normalized variants (trailing variant markers and trailing CJK labels removed, then the leading
+  identifier only). The original name is always tried first and is never degraded.
+- **Identifier verification**: a search result is only accepted when its identifier matches the one
+  parsed from the file name. Previously the first result was taken blindly, which could bind an
+  unrelated entry to the item — producing wrong metadata *and* a wrong cover image, since image URLs
+  are built from the stored provider id.
+
+Only `Jellyfin.Plugin.MetaTube/Providers/MovieProvider.cs` is modified; the change is shared by both
+the Jellyfin and Emby build targets.
+
 ## Platforms
 
 [![Jellyfin](https://img.shields.io/static/v1?color=%2300A4DC&style=for-the-badge&label=Jellyfin&logo=jellyfin&message=10.11.x)](https://jellyfin.org/)
