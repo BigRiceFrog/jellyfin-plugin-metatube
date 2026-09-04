@@ -56,6 +56,15 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             if (firstResult != null) pid = firstResult.GetPid(Plugin.ProviderId);
         }
 
+        // Nothing matched (e.g. a .strm file whose name carries no resolvable ID,
+        // or a custom video with no catalog number). Skip gracefully instead of
+        // calling the info API with empty provider/id and throwing a 404.
+        if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
+        {
+            Logger.Warn("Movie not found, skip metadata: {0}", info.Name);
+            return new MetadataResult<Movie> { HasMetadata = false };
+        }
+
         Logger.Info("Get movie info: {0}", pid.ToString());
 
         var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
@@ -205,9 +214,27 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         var searchResults = new List<MovieSearchResult>();
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
-            // Search movie by name.
-            Logger.Info("Search for movie: {0}", info.Name);
-            searchResults.AddRange(await ApiClient.SearchMovieAsync(info.Name, pid.Provider, cancellationToken));
+            // Search movie by name. Try the original name first, then progressively
+            // normalized variants (strip uncensored/variant suffixes and Chinese tokens,
+            // finally the leading catalog number) so that .strm files with messy names
+            // like "OFJE-550-D" or "FSDSS-789_深田えいみ_无码破解" can still match.
+            foreach (var query in GetSearchCandidates(info.Name))
+            {
+                Logger.Info("Search for movie: {0}", query);
+                try
+                {
+                    var matched = await ApiClient.SearchMovieAsync(query, pid.Provider, cancellationToken);
+                    if (matched != null && matched.Any())
+                    {
+                        searchResults.AddRange(matched);
+                        break;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Logger.Warn("Search failed for movie: {0} ({1})", query, e.Message);
+                }
+            }
         }
         else
         {
@@ -256,6 +283,26 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
 
         return results;
+    }
+
+    private static IEnumerable<string> GetSearchCandidates(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) yield break;
+
+        // Original query first - never degrade a working match.
+        yield return name;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { name };
+
+        // Strip trailing uncensored / variant markers and Chinese suffix tokens.
+        var s = Regex.Replace(name,
+            @"[_\-]?(UC|UCS|CR|CRB|UCF|C|F|D|B|U|无码破解|无码|破解|流出|无修正|中文字幕|中文|无码流出)$",
+            string.Empty, RegexOptions.IgnoreCase);
+        if (seen.Add(s)) yield return s;
+
+        // Fall back to the leading catalog number (e.g. FSDSS-789, SSNI-591, ABP001).
+        var m = Regex.Match(name, @"^[A-Za-z]{2,8}[-]?\d{2,6}", RegexOptions.IgnoreCase);
+        if (m.Success && seen.Add(m.Value)) yield return m.Value;
     }
 
     private async Task SetActorImageUrl(PersonInfo actor, CancellationToken cancellationToken)
