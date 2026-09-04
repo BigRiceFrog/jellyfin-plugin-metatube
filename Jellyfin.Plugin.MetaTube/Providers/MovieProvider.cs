@@ -51,9 +51,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         var pid = info.GetPid(Plugin.ProviderId);
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
-            // Search movies and pick the first result.
-            var firstResult = (await GetSearchResults(info, cancellationToken)).FirstOrDefault();
-            if (firstResult != null) pid = firstResult.GetPid(Plugin.ProviderId);
+            // Search movies and pick the result whose catalog number actually matches.
+            var bestResult = PickBestResult(await GetSearchResults(info, cancellationToken), info.Name);
+            if (bestResult != null) pid = bestResult.GetPid(Plugin.ProviderId);
         }
 
         // Nothing matched (e.g. a .strm file whose name carries no resolvable ID,
@@ -283,6 +283,45 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Extracts the leading catalog number for comparison, e.g. "SSIS-462-UC" -> "SSIS462".
+    /// </summary>
+    private static string ExtractCatalogNumber(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var m = Regex.Match(name, @"[A-Za-z]{2,8}[-_]?\d{2,6}");
+        if (!m.Success) return null;
+        return Regex.Replace(m.Value.ToUpperInvariant(), "[^A-Z0-9]", string.Empty);
+    }
+
+    /// <summary>
+    /// Picks the search result whose catalog number matches the query. Taking the first
+    /// result blindly can bind an unrelated movie (e.g. a DUGA item) to a JavBus number,
+    /// which then yields wrong metadata AND a wrong cover image.
+    /// </summary>
+    private RemoteSearchResult PickBestResult(IEnumerable<RemoteSearchResult> results, string query)
+    {
+        var list = results?.Where(r => r != null).ToList() ?? new List<RemoteSearchResult>();
+        if (list.Count == 0) return null;
+
+        var expected = ExtractCatalogNumber(query);
+        if (string.IsNullOrEmpty(expected)) return list[0];
+
+        foreach (var r in list)
+        {
+            // Search result name is formatted as "[Provider] NUMBER Title".
+            var m = Regex.Match(r.Name ?? string.Empty, @"^\[[^\]]+\]\s*(\S+)");
+            if (!m.Success) continue;
+            var actual = Regex.Replace(m.Groups[1].Value.ToUpperInvariant(), "[^A-Z0-9]", string.Empty);
+            if (string.IsNullOrEmpty(actual)) continue;
+            if (actual == expected || actual.StartsWith(expected)) return r;
+        }
+
+        Logger.Warn("No search result matches catalog number {0} for \"{1}\", skip to avoid wrong metadata/image",
+            expected, query);
+        return null;
     }
 
     private static IEnumerable<string> GetSearchCandidates(string name)
