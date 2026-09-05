@@ -52,7 +52,10 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
         {
             // Search movies and pick the result whose catalog number actually matches.
-            var bestResult = PickBestResult(await GetSearchResults(info, cancellationToken), info.Name);
+            // Walk every candidate query (original -> suffix-stripped -> leading number)
+            // and accept the first hit whose catalog number matches, so a messy original
+            // filename can no longer block scraping when a cleaner variant would match.
+            var bestResult = await PickBestResultAsync(info, cancellationToken);
             if (bestResult != null) pid = bestResult.GetPid(Plugin.ProviderId);
         }
 
@@ -218,6 +221,8 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             // normalized variants (strip uncensored/variant suffixes and Chinese tokens,
             // finally the leading catalog number) so that .strm files with messy names
             // like "OFJE-550-D" or "FSDSS-789_深田えいみ_无码破解" can still match.
+            // NOTE: accumulate every candidate's hits (no early break) so the Identify
+            // dialog shows the broadest possible set to choose from.
             foreach (var query in GetSearchCandidates(info.Name))
             {
                 Logger.Info("Search for movie: {0}", query);
@@ -225,10 +230,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
                 {
                     var matched = await ApiClient.SearchMovieAsync(query, pid.Provider, cancellationToken);
                     if (matched != null && matched.Any())
-                    {
                         searchResults.AddRange(matched);
-                        break;
-                    }
                 }
                 catch (Exception e)
                 {
@@ -269,20 +271,72 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         }
 
         foreach (var m in searchResults)
-        {
-            var result = new RemoteSearchResult
-            {
-                Name = $"[{m.Provider}] {m.Number} {m.Title}",
-                SearchProviderName = Name,
-                PremiereDate = m.ReleaseDate.GetValidDateTime(),
-                ProductionYear = m.ReleaseDate.GetValidYear(),
-                ImageUrl = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, m.ThumbUrl, 1.0, true)
-            };
-            result.SetPid(Name, m.Provider, m.Id, pid.Position);
-            results.Add(result);
-        }
+            results.Add(ToRemoteSearchResult(m, pid.Position));
 
         return results;
+    }
+
+    /// <summary>
+    /// Walks the candidate queries (original name -> suffix-stripped -> leading catalog
+    /// number) and returns the first search result whose catalog number actually matches
+    /// the query. Unlike a single blind search, this keeps trying cleaner variants after a
+    /// fuzzy/wrong first hit, which is what recovers scraping for .strm files whose messy
+    /// filename yields a non-matching result on the first attempt. Wrong images are still
+    /// avoided because every accepted result must pass the catalog-number check.
+    /// </summary>
+    private async Task<RemoteSearchResult> PickBestResultAsync(MovieInfo info,
+        CancellationToken cancellationToken)
+    {
+        var pid = info.GetPid(Plugin.ProviderId);
+
+        foreach (var query in GetSearchCandidates(info.Name))
+        {
+            Logger.Info("Search for movie: {0}", query);
+            List<MovieSearchResult> matched;
+            try
+            {
+                matched = (await ApiClient.SearchMovieAsync(query, pid.Provider, cancellationToken))?.ToList();
+            }
+            catch (Exception e)
+            {
+                Logger.Warn("Search failed for movie: {0} ({1})", query, e.Message);
+                continue;
+            }
+
+            if (matched == null || !matched.Any()) continue;
+
+            // Apply the provider filter the same way GetSearchResults does.
+            if (Configuration.EnableMovieProviderFilter &&
+                Configuration.GetMovieProviderFilter() is { } filter && filter.Any())
+            {
+                matched.RemoveAll(m => !filter.Contains(m.Provider, StringComparer.OrdinalIgnoreCase));
+            }
+
+            var remote = matched.Select(m => ToRemoteSearchResult(m, pid.Position)).ToList();
+            var best = PickBestResult(remote, query);
+            if (best != null) return best;
+
+            Logger.Warn("Candidate \"{0}\" returned results but none matched the catalog number, trying next variant",
+                query);
+        }
+
+        Logger.Warn("No search result matched any catalog-number variant for \"{0}\", skip to avoid wrong metadata/image",
+            info.Name);
+        return null;
+    }
+
+    private RemoteSearchResult ToRemoteSearchResult(MovieSearchResult m, double? position)
+    {
+        var result = new RemoteSearchResult
+        {
+            Name = $"[{m.Provider}] {m.Number} {m.Title}",
+            SearchProviderName = Name,
+            PremiereDate = m.ReleaseDate.GetValidDateTime(),
+            ProductionYear = m.ReleaseDate.GetValidYear(),
+            ImageUrl = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, m.ThumbUrl, 1.0, true)
+        };
+        result.SetPid(Name, m.Provider, m.Id, position);
+        return result;
     }
 
     /// <summary>
@@ -316,7 +370,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             if (!m.Success) continue;
             var actual = Regex.Replace(m.Groups[1].Value.ToUpperInvariant(), "[^A-Z0-9]", string.Empty);
             if (string.IsNullOrEmpty(actual)) continue;
-            if (actual == expected || actual.StartsWith(expected)) return r;
+            // Exact, or one side is a prefix of the other (covers provider-side suffixes
+            // like "SSIS-462-UC" as well as filename-side extras).
+            if (actual == expected || actual.StartsWith(expected) || expected.StartsWith(actual)) return r;
         }
 
         Logger.Warn("No search result matches catalog number {0} for \"{1}\", skip to avoid wrong metadata/image",
