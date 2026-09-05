@@ -351,9 +351,12 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
     }
 
     /// <summary>
-    /// Picks the search result whose catalog number matches the query. Taking the first
-    /// result blindly can bind an unrelated movie (e.g. a DUGA item) to a JavBus number,
-    /// which then yields wrong metadata AND a wrong cover image.
+    /// Picks the search result whose CORE catalog number exactly equals the query's core
+    /// catalog number. Taking the first result blindly, or using loose prefix matching,
+    /// can bind an unrelated movie to the file, producing wrong metadata AND a wrong cover
+    /// image (番号对不上). The core is the leading letters + digits with any variant suffix
+    /// (e.g. -UC, -C, -4K, HE) ignored, so "SSIS-462-C" still matches "SSIS-462" while
+    /// "SSIS-462" can never accidentally match "SSIS-4620".
     /// </summary>
     private RemoteSearchResult PickBestResult(IEnumerable<RemoteSearchResult> results, string query)
     {
@@ -361,6 +364,7 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
         if (list.Count == 0) return null;
 
         var expected = ExtractCatalogNumber(query);
+        // No resolvable catalog number in the query -> cannot verify, fall back to first.
         if (string.IsNullOrEmpty(expected)) return list[0];
 
         foreach (var r in list)
@@ -368,11 +372,9 @@ public class MovieProvider : BaseProvider, IRemoteMetadataProvider<Movie, MovieI
             // Search result name is formatted as "[Provider] NUMBER Title".
             var m = Regex.Match(r.Name ?? string.Empty, @"^\[[^\]]+\]\s*(\S+)");
             if (!m.Success) continue;
-            var actual = Regex.Replace(m.Groups[1].Value.ToUpperInvariant(), "[^A-Z0-9]", string.Empty);
+            var actual = ExtractCatalogNumber(m.Groups[1].Value);
             if (string.IsNullOrEmpty(actual)) continue;
-            // Exact, or one side is a prefix of the other (covers provider-side suffixes
-            // like "SSIS-462-UC" as well as filename-side extras).
-            if (actual == expected || actual.StartsWith(expected) || expected.StartsWith(actual)) return r;
+            if (actual == expected) return r;
         }
 
         Logger.Warn("No search result matches catalog number {0} for \"{1}\", skip to avoid wrong metadata/image",
