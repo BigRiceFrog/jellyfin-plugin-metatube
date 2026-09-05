@@ -211,37 +211,82 @@ public static class ApiClient
     private static async Task<T> GetDataAsync<T>(string url, bool requireAuth,
         CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
+        // Retry transient upstream failures (e.g. javbus connection resets / 5xx / EOF).
+        // Without this, a single flaky response during a bulk library refresh permanently
+        // skips the item, which is the main cause of "many items not scraped".
+        const int maxAttempts = 4;
+        var delay = TimeSpan.FromSeconds(1);
+        Exception lastException = null;
 
-        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
 
-        // Add General Headers.
-        request.Headers.Add("Accept", "application/json");
-        request.Headers.Add("User-Agent", DefaultUserAgent);
+            try
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
 
-        // Set API Authorization Token.
-        if (requireAuth && !string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.Token))
-            request.Headers.Authorization =
-                new AuthenticationHeaderValue("Bearer", Plugin.Instance.Configuration.Token);
+                // Add General Headers.
+                request.Headers.Add("Accept", "application/json");
+                request.Headers.Add("User-Agent", DefaultUserAgent);
 
-        var response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+                // Set API Authorization Token.
+                if (requireAuth && !string.IsNullOrWhiteSpace(Plugin.Instance.Configuration.Token))
+                    request.Headers.Authorization =
+                        new AuthenticationHeaderValue("Bearer", Plugin.Instance.Configuration.Token);
 
-        // Nullable forgiving reason:
-        // Response is unlikely to be null.
-        // If it happens to be null, an exception is planed to be thrown either way.
-        var apiResponse = (await response.Content!
-            .ReadFromJsonAsync<ResponseInfo<T>>(cancellationToken: cancellationToken).ConfigureAwait(false))!;
+                var response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
-        // EnsureSuccessStatusCode ignoring reason:
-        // When the status is unsuccessful, the API response contains error details.
-        if (!response.IsSuccessStatusCode && apiResponse.Error != null)
-            throw new Exception($"API request error: {apiResponse.Error.Code} ({apiResponse.Error.Message})");
+                // Nullable forgiving reason:
+                // Response is unlikely to be null.
+                // If it happens to be null, an exception is planed to be thrown either way.
+                var apiResponse = (await response.Content!
+                    .ReadFromJsonAsync<ResponseInfo<T>>(cancellationToken: cancellationToken)
+                    .ConfigureAwait(false))!;
 
-        // Note: data field must not be null if there are no errors.
-        if (apiResponse.Data == null)
-            throw new Exception("Response data field is null");
+                // EnsureSuccessStatusCode ignoring reason:
+                // When the status is unsuccessful, the API response contains error details.
+                if (!response.IsSuccessStatusCode && apiResponse.Error != null)
+                {
+                    var code = apiResponse.Error.Code;
+                    var message = apiResponse.Error.Message ?? string.Empty;
 
-        return apiResponse.Data;
+                    // Retry only transient upstream failures; definitive errors (e.g. 404) bail out.
+                    var transient = code is 500 or 502 or 503 or 504 ||
+                                    message.Contains("EOF", StringComparison.OrdinalIgnoreCase);
+                    if (!transient)
+                        throw new Exception($"API request error: {code} ({message})");
+
+                    lastException = new Exception($"API request error: {code} ({message})");
+                }
+                else if (apiResponse.Data == null)
+                {
+                    // Empty payload is treated as a transient glitch and retried.
+                    lastException = new Exception("Response data field is null");
+                }
+                else
+                {
+                    return apiResponse.Data;
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or
+                                       TaskCanceledException or OperationCanceledException)
+            {
+                // Network-level transient failures (connection reset / timeout / truncated body).
+                // Never swallow a real user cancellation.
+                if (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+                    throw;
+                lastException = ex;
+            }
+
+            // Back off before the next attempt (except after the final one).
+            if (attempt < maxAttempts)
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            delay *= 2;
+        }
+
+        throw new Exception($"MetaTube request failed after {maxAttempts} attempts: {lastException?.Message}",
+            lastException);
     }
 
     #region Http
