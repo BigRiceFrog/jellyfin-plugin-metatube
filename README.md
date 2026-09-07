@@ -54,8 +54,12 @@ This fork improves metadata scraping for libraries built from `.strm` files:
   unrelated entry to the item — producing wrong metadata *and* a wrong cover image, since image URLs
   are built from the stored provider id.
 
-Only `Jellyfin.Plugin.MetaTube/Providers/MovieProvider.cs` is modified; the change is shared by both
-the Jellyfin and Emby build targets.
+- **Images survive a failing detail request**: `Primary`, `Thumb` and `Backdrop` URLs are built from
+  the stored provider id, so they stay available even when the metadata detail request fails. One
+  unreachable upstream source no longer strips an item of all its artwork.
+
+Only `Providers/MovieProvider.cs` and `Providers/MovieImageProvider.cs` are modified; both changes
+are shared by the Jellyfin and Emby build targets.
 
 ## Platforms
 
