@@ -35,51 +35,65 @@ public class MovieImageProvider : BaseProvider, IRemoteImageProvider, IHasOrder
         if (string.IsNullOrWhiteSpace(pid.Id) || string.IsNullOrWhiteSpace(pid.Provider))
             return Enumerable.Empty<RemoteImageInfo>();
 
-        var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
+        // The base images only need provider/id, so they keep working even when the
+        // metadata detail request fails (e.g. an upstream source is unreachable).
         var images = new List<RemoteImageInfo>
         {
             new()
             {
                 ProviderName = Name,
                 Type = ImageType.Primary,
-                Url = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, pid.Position ?? -1)
+                Url = ApiClient.GetPrimaryImageApiUrl(pid.Provider, pid.Id, pid.Position ?? -1)
             },
             new()
             {
                 ProviderName = Name,
                 Type = ImageType.Thumb,
-                Url = ApiClient.GetThumbImageApiUrl(m.Provider, m.Id)
+                Url = ApiClient.GetThumbImageApiUrl(pid.Provider, pid.Id)
             },
             new()
             {
                 ProviderName = Name,
                 Type = ImageType.Backdrop,
-                Url = ApiClient.GetBackdropImageApiUrl(m.Provider, m.Id)
+                Url = ApiClient.GetBackdropImageApiUrl(pid.Provider, pid.Id)
             }
         };
 
-        foreach (var imageUrl in m.PreviewImages ?? Enumerable.Empty<string>())
+        try
         {
-            images.Add(new RemoteImageInfo
-            {
-                ProviderName = Name,
-                Type = ImageType.Primary,
-                Url = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, imageUrl, pid.Position ?? -1)
-            });
+            var m = await ApiClient.GetMovieInfoAsync(pid.Provider, pid.Id, cancellationToken);
+            if (m == null) return images;
 
-            images.Add(new RemoteImageInfo
-            {
-                ProviderName = Name,
-                Type = ImageType.Thumb,
-                Url = ApiClient.GetThumbImageApiUrl(m.Provider, m.Id, imageUrl)
-            });
+            // Replace the placeholders with the detail-based ones once available.
+            images[2].Url = ApiClient.GetBackdropImageApiUrl(m.Provider, m.Id);
 
-            images.Add(new RemoteImageInfo
+            foreach (var imageUrl in m.PreviewImages ?? Enumerable.Empty<string>())
             {
-                ProviderName = Name,
-                Type = ImageType.Backdrop,
-                Url = ApiClient.GetBackdropImageApiUrl(m.Provider, m.Id, imageUrl)
-            });
+                images.Add(new RemoteImageInfo
+                {
+                    ProviderName = Name,
+                    Type = ImageType.Primary,
+                    Url = ApiClient.GetPrimaryImageApiUrl(m.Provider, m.Id, imageUrl, pid.Position ?? -1)
+                });
+
+                images.Add(new RemoteImageInfo
+                {
+                    ProviderName = Name,
+                    Type = ImageType.Thumb,
+                    Url = ApiClient.GetThumbImageApiUrl(m.Provider, m.Id, imageUrl)
+                });
+
+                images.Add(new RemoteImageInfo
+                {
+                    ProviderName = Name,
+                    Type = ImageType.Backdrop,
+                    Url = ApiClient.GetBackdropImageApiUrl(m.Provider, m.Id, imageUrl)
+                });
+            }
+        }
+        catch (Exception e)
+        {
+            Logger.Warn("Failed to fetch movie details for extra images: {0} ({1})", pid.Id, e.Message);
         }
 
         return images;
